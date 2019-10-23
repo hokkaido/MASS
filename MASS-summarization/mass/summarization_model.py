@@ -19,6 +19,8 @@ from fairseq.modules import (
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .learned_sentence_embedding import LearnedPositionalSentenceEmbedding
+from .ner import ENTITY_TYPES
+from .utils import create_ner_from_output_tokens
 
 DEFAULT_MAX_SOURCE_POSITIONS = 512
 DEFAULT_MAX_TARGET_POSITIONS = 512
@@ -138,7 +140,7 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
     def max_positions(self):
         return self.encoder.max_positions(), self.decoder.max_positions()
 
-    def forward(self, src_tokens=None, src_lengths=None, prev_output_tokens=None, **kwargs):
+    def forward(self, src_tokens=None, src_lengths=None, prev_output_tokens=None, src_entities=None, prev_output_entities=None, **kwargs):
         """
         Run the forward pass for an encoder-decoder model.
 
@@ -161,8 +163,8 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
                 - the decoder's output of shape `(batch, tgt_len, vocab)`
                 - a dictionary with any model-specific outputs
         """
-        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, **kwargs)
-        decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, **kwargs)
+        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, src_entities=src_entities, **kwargs)
+        decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, prev_output_entities=prev_output_entities, **kwargs)
         return decoder_out
 
 
@@ -388,6 +390,15 @@ class TransformerEncoder(FairseqEncoder):
         self.embed_positions = LearnedPositionalEmbedding(
             args.max_source_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
+
+        if args.embed_entities:
+            self.embed_entities = Embedding(len(ENTITY_TYPES) + 1 + self.padding_idx, embed_dim, self.padding_idx)
+
+        self.segment_embeddings = None
+        """
+        self.segment_embeddings = Embedding(
+            len(dictionary), embed_dim, self.padding_idx)"""
+
         """self.embed_sent_positions = LearnedPositionalSentenceEmbedding(
             args.max_source_positions + 1 + self.padding_idx, embed_dim, self.padding_idx, self.eos_idx
         )"""
@@ -411,7 +422,7 @@ class TransformerEncoder(FairseqEncoder):
 
         self.apply(init_bert_params)
 
-    def forward(self, src_tokens, src_lengths, **unused):
+    def forward(self, src_tokens, src_lengths, src_entities, **unused):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -433,8 +444,15 @@ class TransformerEncoder(FairseqEncoder):
 
         # embed tokens and positions
         x = self.embed_scale * self.embed_tokens(src_tokens)
+
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
+
+        if self.embed_entities is not None and src_entities is not None:
+            x += self.embed_entities(src_entities)
+        """
+        if self.segment_embeddings is not None and src_segment_labels is not None:
+            x += self.segment_embeddings(src_segment_labels)"""
 
         """
         if self.embed_sent_positions is not None:
@@ -519,6 +537,16 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             args.max_target_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
 
+        if args.embed_entities:
+            self.embed_entities = Embedding(
+                len(ENTITY_TYPES) + 1 + self.padding_idx, self.embed_dim, self.padding_idx)
+
+        self.segment_embeddings = None
+        """
+        self.segment_embeddings = Embedding(
+            len(dictionary), self.embed_dim, self.padding_idx)
+        """
+
         self.layers = nn.ModuleList([])
         self.layers.extend([
             TransformerDecoderLayer(
@@ -544,12 +572,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 prev_output_tokens, 
                 encoder_out=None, 
                 incremental_state=None, 
+                prev_output_entities=None,
                 **unused):
-        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, **unused)
+        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, **unused)
         x = self.output_layer(x)
         return x, extra
 
-    def extract_features(self, prev_output_tokens, encoder_out=None, incremental_state=None, **unused):
+    def extract_features(self, prev_output_tokens, encoder_out=None, incremental_state=None, prev_output_entities=None, **unused):
         # embed positions
         if 'positions' in unused:
             positions = self.embed_positions._forward(unused['positions'])
@@ -560,15 +589,23 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             ) if self.embed_positions is not None else None
 
         if incremental_state is not None:
+            if prev_output_entities is None:
+                prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
+            prev_output_entities = prev_output_entities[:, -1:]
             prev_output_tokens = prev_output_tokens[:, -1:]
             if positions is not None:
                 positions = positions[:, -1:]
-
         # embed tokens and positions
         x = self.embed_scale * self.embed_tokens(prev_output_tokens)
 
         if positions is not None:
             x += positions
+        """
+        if self.segment_embeddings is not None and tgt_segment_labels is not None:
+            x += self.segment_embeddings(tgt_segment_labels)
+        """
+        if self.embed_entities is not None and prev_output_entities is not None:
+            x += self.embed_entities(prev_output_entities)
 
         if self.emb_layer_norm:
             x = self.emb_layer_norm(x)
@@ -596,9 +633,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x = x.transpose(0, 1)
         attns = {'attn': attn, 'inner_states': inner_states}
         
-        if self.copy_attn:
-            print('WEGOGOG')
-            attns['copy'] = attn
+        #if self.copy_attn:
+        #   print('WEGOGOG')
+        #   attns['copy'] = attn
 
         return x, attns
 
