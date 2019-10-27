@@ -21,6 +21,7 @@ from .learned_positional_embedding import LearnedPositionalEmbedding
 from .learned_sentence_embedding import LearnedPositionalSentenceEmbedding
 from .ner import ENTITY_TYPES
 from .utils import create_ner_from_output_tokens
+import random
 
 DEFAULT_MAX_SOURCE_POSITIONS = 512
 DEFAULT_MAX_TARGET_POSITIONS = 512
@@ -140,7 +141,8 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
     def max_positions(self):
         return self.encoder.max_positions(), self.decoder.max_positions()
 
-    def forward(self, src_tokens=None, src_lengths=None, prev_output_tokens=None, src_entities=None, prev_output_entities=None, **kwargs):
+    def forward(self, src_tokens=None, src_lengths=None, prev_output_tokens=None, src_entities=None, 
+                prev_output_entities=None, src_segment_labels=None, tgt_segment_labels=None, **kwargs):
         """
         Run the forward pass for an encoder-decoder model.
 
@@ -163,8 +165,20 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
                 - the decoder's output of shape `(batch, tgt_len, vocab)`
                 - a dictionary with any model-specific outputs
         """
-        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths, src_entities=src_entities, **kwargs)
-        decoder_out = self.decoder(prev_output_tokens, encoder_out=encoder_out, prev_output_entities=prev_output_entities, **kwargs)
+        encoder_out = self.encoder(
+            src_tokens, 
+            src_lengths=src_lengths, 
+            src_entities=src_entities, 
+            src_segment_labels=src_segment_labels, 
+            **kwargs)
+
+        decoder_out = self.decoder(
+            prev_output_tokens, 
+            encoder_out=encoder_out, 
+            prev_output_entities=prev_output_entities, 
+            tgt_segment_labels=tgt_segment_labels,
+            **kwargs)
+            
         return decoder_out
 
 
@@ -391,14 +405,15 @@ class TransformerEncoder(FairseqEncoder):
             args.max_source_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
 
+        self.max_segments = args.max_segments
+
         if args.embed_entities:
-            self.embed_entities = Embedding(len(ENTITY_TYPES) + 1 + self.padding_idx, embed_dim, self.padding_idx)
+            self.embed_entities = Embedding(22, embed_dim, self.padding_idx)
 
-        self.segment_embeddings = None
-        """
-        self.segment_embeddings = Embedding(
-            len(dictionary), embed_dim, self.padding_idx)"""
-
+        if args.segment_tokens is not None:        
+            self.embed_segments = Embedding(
+                self.max_segments, embed_dim, self.padding_idx)
+        
         """self.embed_sent_positions = LearnedPositionalSentenceEmbedding(
             args.max_source_positions + 1 + self.padding_idx, embed_dim, self.padding_idx, self.eos_idx
         )"""
@@ -422,7 +437,7 @@ class TransformerEncoder(FairseqEncoder):
 
         self.apply(init_bert_params)
 
-    def forward(self, src_tokens, src_lengths, src_entities, **unused):
+    def forward(self, src_tokens, src_lengths, src_entities, src_segment_labels, **unused):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -447,12 +462,12 @@ class TransformerEncoder(FairseqEncoder):
 
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
+      
+        if self.embed_segments is not None and src_segment_labels is not None:
+            x += self.embed_segments(src_segment_labels)
 
         if self.embed_entities is not None and src_entities is not None:
             x += self.embed_entities(src_entities)
-        """
-        if self.segment_embeddings is not None and src_segment_labels is not None:
-            x += self.segment_embeddings(src_segment_labels)"""
 
         """
         if self.embed_sent_positions is not None:
@@ -532,20 +547,18 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.embed_dim = embed_dim
         self.embed_tokens = embed_tokens
         self.embed_scale = math.sqrt(embed_dim)  # todo: try with input_embed_dim
-        
+        self.max_segments = args.max_segments
         self.embed_positions = LearnedPositionalEmbedding(
             args.max_target_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
 
         if args.embed_entities:
-            self.embed_entities = Embedding(
-                len(ENTITY_TYPES) + 1 + self.padding_idx, self.embed_dim, self.padding_idx)
+            self.embed_entities = Embedding(22, self.embed_dim, self.padding_idx)
 
-        self.segment_embeddings = None
-        """
-        self.segment_embeddings = Embedding(
-            len(dictionary), self.embed_dim, self.padding_idx)
-        """
+        if args.segment_tokens:
+            self.embed_segments = Embedding(
+                self.max_segments, self.embed_dim, self.padding_idx)
+        
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
@@ -573,12 +586,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 encoder_out=None, 
                 incremental_state=None, 
                 prev_output_entities=None,
+                tgt_segment_labels=None,
                 **unused):
-        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, **unused)
+        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, tgt_segment_labels, **unused)
         x = self.output_layer(x)
         return x, extra
 
-    def extract_features(self, prev_output_tokens, encoder_out=None, incremental_state=None, prev_output_entities=None, **unused):
+    def extract_features(self, prev_output_tokens, encoder_out=None, incremental_state=None, 
+                        prev_output_entities=None, tgt_segment_labels=None, **unused):
         # embed positions
         if 'positions' in unused:
             positions = self.embed_positions._forward(unused['positions'])
@@ -589,8 +604,12 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             ) if self.embed_positions is not None else None
 
         if incremental_state is not None:
+            print('we have incremental state')
             if prev_output_entities is None:
-                prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
+                if random.random() < 0.5:
+                    prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
+                else:
+                    prev_output_entities = torch.ones_like(prev_output_tokens)
             prev_output_entities = prev_output_entities[:, -1:]
             prev_output_tokens = prev_output_tokens[:, -1:]
             if positions is not None:
@@ -600,10 +619,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         if positions is not None:
             x += positions
-        """
-        if self.segment_embeddings is not None and tgt_segment_labels is not None:
-            x += self.segment_embeddings(tgt_segment_labels)
-        """
+                          
+        if self.embed_segments is not None and tgt_segment_labels is not None:
+            x += self.embed_segments(tgt_segment_labels)
+
         if self.embed_entities is not None and prev_output_entities is not None:
             x += self.embed_entities(prev_output_entities)
 

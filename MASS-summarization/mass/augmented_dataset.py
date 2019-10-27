@@ -69,20 +69,11 @@ def collate_ner_tokens(values, pad_idx, left_pad=False, move_eos_to_beginning=Fa
     return res
 
 def collate(
-    samples, src_dict, left_pad_source=True, left_pad_target=False,
-    input_feeding=True, embed_entities=False
+    samples, pad_idx, eos_idx, ent_pad_idx, ent_eos_idx, left_pad_source=True, left_pad_target=False,
+    input_feeding=True,
 ):
-
-    pad_idx = src_dict.pad()
-    eos_idx = src_dict.eos()
-
     if len(samples) == 0:
         return {}
-
-    def collate_token_types():
-        for s in samples:
-            s['source_entities'] = create_ner(s['source'], src_dict)
-            s['target_entities'] = create_ner(s['target'], src_dict)
 
     def merge(key, left_pad, move_eos_to_beginning=False):
         return data_utils.collate_tokens(
@@ -90,28 +81,21 @@ def collate(
             pad_idx, eos_idx, left_pad, move_eos_to_beginning,
         )
 
-    def merge_ner(key, left_pad, move_eos_to_beginning=False):
-        return collate_ner_tokens(
+    def merge_ent(key, left_pad, move_eos_to_beginning=False):
+        return data_utils.collate_tokens(
             [s[key] for s in samples],
-            pad_idx, left_pad, move_eos_to_beginning,
+            ent_pad_idx, ent_eos_idx, left_pad, move_eos_to_beginning,
         )
 
     id = torch.LongTensor([s['id'] for s in samples])
-          
     src_tokens = merge('source', left_pad=left_pad_source)
-    src_entities = None
-
-    if embed_entities:
-        collate_token_types()
-        src_entities = merge_ner('source_entities', left_pad=left_pad_source)
-
+    src_entities = merge_ent('source_entities', left_pad=left_pad_source)
     # sort by descending source length
     src_lengths = torch.LongTensor([s['source'].numel() for s in samples])
     src_lengths, sort_order = src_lengths.sort(descending=True)
     id = id.index_select(0, sort_order)
     src_tokens = src_tokens.index_select(0, sort_order)
-    if embed_entities:
-        src_entities = src_entities.index_select(0, sort_order)
+    src_entities = src_entities.index_select(0, sort_order)
     prev_output_tokens = None
     prev_output_entities = None
     target = None
@@ -119,24 +103,21 @@ def collate(
         target = merge('target', left_pad=left_pad_target)
         target = target.index_select(0, sort_order)
         ntokens = sum(len(s['target']) for s in samples)
-
         if input_feeding:
             # we create a shifted version of targets for feeding the
             # previous output token(s) into the next decoder step
-
             prev_output_tokens = merge(
                 'target',
                 left_pad=left_pad_target,
                 move_eos_to_beginning=True,
             )
             prev_output_tokens = prev_output_tokens.index_select(0, sort_order)
-            if embed_entities:
-                prev_output_entities = merge_ner(
-                    'target_entities',
-                    left_pad=left_pad_target,
-                    move_eos_to_beginning=True,
-                )
-                prev_output_entities = prev_output_entities.index_select(0, sort_order)
+            prev_output_entities = merge_ent(
+                'target_entities',
+                left_pad=left_pad_target,
+                move_eos_to_beginning=True,
+            )
+            prev_output_entities = prev_output_tokens.index_select(0, sort_order)
     else:
         ntokens = sum(len(s['source']) for s in samples)
 
@@ -146,34 +127,35 @@ def collate(
         'ntokens': ntokens,
         'net_input': {
             'src_tokens': src_tokens,
+            'src_entities': src_entities,
             'src_lengths': src_lengths,
         },
         'target': target,
     }
-    assert src_tokens.numel() == src_entities.numel()
-
-    if src_entities is not None:
-        batch['net_input']['src_entities'] = src_entities
-
     if prev_output_tokens is not None:
         batch['net_input']['prev_output_tokens'] = prev_output_tokens
-
     if prev_output_entities is not None:
-        assert prev_output_tokens.numel() == prev_output_entities.numel()
         batch['net_input']['prev_output_entities'] = prev_output_entities
-
     return batch
 
-class SegmentedLanguagePairDataset(BaseWrapperDataset):
-    """ Wrapper for segmented language pair datasets 
+class AugmentedLanguagePairDataset(BaseWrapperDataset):
+    """ Wrapper for augmented language pair datasets 
         
         Requires a shared vocabulary
     """
-    def __init__(self, dataset, embed_entities=False, segment_tokens_idx=None, max_segments=None):
+    def __init__(self, dataset, entities):
         super().__init__(dataset)      
-        self.embed_entities = embed_entities
-        self.segment_tokens_idx = segment_tokens_idx
-        self.max_segments = max_segments
+        self.entities = entities
+
+    def __getitem__(self, index):
+
+        sample = self.dataset[index]
+        entities = self.entities[index]
+
+        sample['source_entities'] = entities['source']
+        sample['target_entities'] = entities['target']
+
+        return sample
         
     def collater(self, samples):
         """Merge a list of samples to form a mini-batch.
@@ -199,15 +181,10 @@ class SegmentedLanguagePairDataset(BaseWrapperDataset):
                   target sentence of shape `(bsz, tgt_len)`. Padding will appear
                   on the left if *left_pad_target* is ``True``.
         """
-        batch = collate(
-            samples, self.dataset.src_dict,
-            left_pad_source=self.dataset.left_pad_source, left_pad_target=self.dataset.left_pad_target,
-            input_feeding=self.dataset.input_feeding, embed_entities=self.embed_entities
+        return collate(
+            samples, pad_idx=self.dataset.src_dict.pad(), eos_idx=self.dataset.src_dict.eos(),
+            ent_pad_idx=self.entities.src_dict.pad(), ent_eos_idx=self.entities.src_dict.eos(),
+            left_pad_source=self.left_pad_source, left_pad_target=self.left_pad_target,
+            input_feeding=self.input_feeding,
         )
- 
-        if self.segment_tokens_idx is not None:
-            src_item = batch['net_input']['src_tokens']
-            tgt_item = batch['net_input']['prev_output_tokens']
-            batch['net_input']['src_segment_labels'] = create_segments(src_item, self.segment_tokens_idx, self.max_segments)
-            batch['net_input']['tgt_segment_labels'] = create_segments(tgt_item, self.segment_tokens_idx, self.max_segments)
-        return batch
+

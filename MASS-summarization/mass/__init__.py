@@ -5,3 +5,4 @@ from . import summarization_model
 from . import translation
 from . import summarization
 from . import segmented_summarization
+from . import augmented_summarization

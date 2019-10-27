@@ -48,7 +48,9 @@ class SegmentedSummarizationTask(TranslationTask):
         parser.add_argument('--upsample-primary', default=1, type=int,
                             help='amount to upsample primary dataset')
         parser.add_argument('--segment-tokens', default=None, type=str,
-                            help='Word prediction probability for decoder mask, i.e. ".,!,?,[SEP]" Will add an additional segment embedding')
+                            help='Tokens to use as a segment, i.e. ".,!,?,[SEP]". This will add an additional segment embedding')
+        parser.add_argument('--max-segments', default=64, type=int, metavar='N',
+                            help='max number of segments to embed in a sequence')
         parser.add_argument('--embed-entities', action='store_true',
                             help='Add an additional NER embedding layer')
         # fmt: on
@@ -74,7 +76,11 @@ class SegmentedSummarizationTask(TranslationTask):
             segment_tokens = self.args.segment_tokens.split(',')
             segment_tokens_idx = [self.src_dict.index(token) for token in segment_tokens]
 
-        self.datasets[split] = SegmentedLanguagePairDataset(self.datasets[split], embed_entities=self.args.embed_entities, segment_tokens_idx=segment_tokens_idx)
+        self.datasets[split] = SegmentedLanguagePairDataset(
+            self.datasets[split],
+            embed_entities=self.args.embed_entities,
+            segment_tokens_idx=segment_tokens_idx, 
+            max_segments=self.args.max_segments)
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""

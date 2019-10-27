@@ -71,6 +71,7 @@ class MultiprocessingEncoder(object):
     def initializer(self):
         global bpe
         bpe = BertTokenizer.from_pretrained('bert-base-uncased')
+        bpe.do_basic_tokenize = False
 
     def encode(self, line):
         global bpe
@@ -91,6 +92,8 @@ class MultiprocessingEncoder(object):
             if len(line) == 0 and not self.args.keep_empty:
                 return ["EMPTY", None]
             tokens = self.encode(line)
+            #tokens = tokens[:400]
+            #tokens[-1] = '[SEP]'
             enc_lines.append(" ".join(tokens))
         return ["PASS", enc_lines]
 
