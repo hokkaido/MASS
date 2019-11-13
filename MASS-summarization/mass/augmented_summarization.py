@@ -51,8 +51,10 @@ class AugmentedSummarizationTask(TranslationTask):
                             help='Tokens to use as a segment, i.e. ".,!,?,[SEP]". This will add an additional segment embedding')
         parser.add_argument('--max-segments', default=64, type=int, metavar='N',
                             help='max number of segments to embed in a sequence')
-        parser.add_argument('--embed-entities', action='store_true',
-                            help='Add an additional NER embedding layer')
+        parser.add_argument('--embed-entities-encoder', action='store_true',
+                            help='Add an additional NER embedding layer for encoding')
+        parser.add_argument('--embed-entities-decoder', action='store_true',
+                            help='Add an additional NER embedding layer for decoding')
         # fmt: on
 
     def __init__(self, args, src_dict, tgt_dict, ent_src_dict, ent_tgt_dict):
@@ -141,6 +143,10 @@ class AugmentedSummarizationTask(TranslationTask):
             max_source_positions=self.args.max_source_positions,
             max_target_positions=self.args.max_target_positions,
         )
+
+    def build_dataset_for_inference(self, src_tokens, src_lengths):
+       print('woot')
+       return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary)
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""

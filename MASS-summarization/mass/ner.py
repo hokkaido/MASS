@@ -1,4 +1,8 @@
 import numpy as np
+import re
+import unicodedata
+
+alpha_re = re.compile(r"[^A-Za-z]+")
 
 """
 PERSON	People, including fictional.
@@ -36,15 +40,28 @@ ENTITY_TYPES = {
     'DATE': 12,
     'TIME': 13,
     'PERCENT': 14,
-    'MONEY	': 15,
+    'MONEY': 15,
     'QUANTITY': 16,
     'ORDINAL': 17,
     'CARDINAL': 18,
-    'RUBBISH': 19,
 }
+
+def run_strip_accents(text):
+    """Strips accents from a piece of text."""
+    text = unicodedata.normalize("NFD", text)
+    output = []
+    for char in text:
+        cat = unicodedata.category(char)
+        if cat == "Mn":
+            continue
+        output.append(char)
+    return "".join(output)
 
 def clean_wp_token(token):
     return token.replace("##", "", 1).strip()
+
+def clean_spacy_token(text):
+    return run_strip_accents(text.rstrip().lower())
 
 def flatten_list(nested):
     """Flatten a nested list."""
@@ -54,10 +71,17 @@ def flatten_list(nested):
     return flat
 
 def align_tokens(doc, wp_tokens, *, offset=0):
-        spacy_tokens = [w.text.rstrip().lower() for w in doc]
+        spacy_tokens = [clean_spacy_token(w.text) for w in doc]
         new_wp_tokens = [clean_wp_token(t) for t in wp_tokens]
         assert len(wp_tokens) == len(new_wp_tokens)
-        align = align_word_pieces(spacy_tokens, new_wp_tokens, retry=False)
+        align = align_word_pieces(spacy_tokens, new_wp_tokens, retry=True)
+        if align is None:
+            spacy_string = "".join(spacy_tokens).lower()
+            wp_string = "".join(new_wp_tokens).lower()
+            print("spaCy:", spacy_string)
+            print("WP:", wp_string)
+            raise AssertionError((spacy_string, wp_string))
+
         for indices in align:
             for i in range(len(indices)):
                 indices[i] += offset

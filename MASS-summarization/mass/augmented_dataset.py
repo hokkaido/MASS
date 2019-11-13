@@ -117,7 +117,7 @@ def collate(
                 left_pad=left_pad_target,
                 move_eos_to_beginning=True,
             )
-            prev_output_entities = prev_output_tokens.index_select(0, sort_order)
+            prev_output_entities = prev_output_entities.index_select(0, sort_order)
     else:
         ntokens = sum(len(s['source']) for s in samples)
 
@@ -184,7 +184,7 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
         return collate(
             samples, pad_idx=self.dataset.src_dict.pad(), eos_idx=self.dataset.src_dict.eos(),
             ent_pad_idx=self.entities.src_dict.pad(), ent_eos_idx=self.entities.src_dict.eos(),
-            left_pad_source=self.left_pad_source, left_pad_target=self.left_pad_target,
-            input_feeding=self.input_feeding,
+            left_pad_source=self.dataset.left_pad_source, left_pad_target=self.dataset.left_pad_target,
+            input_feeding=self.dataset.input_feeding,
         )
 

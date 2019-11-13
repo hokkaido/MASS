@@ -20,7 +20,7 @@ from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .learned_sentence_embedding import LearnedPositionalSentenceEmbedding
 from .ner import ENTITY_TYPES
-from .utils import create_ner_from_output_tokens
+from .utils import create_cheap_ner, create_ner_from_output_tokens
 import random
 
 DEFAULT_MAX_SOURCE_POSITIONS = 512
@@ -407,9 +407,11 @@ class TransformerEncoder(FairseqEncoder):
 
         self.max_segments = args.max_segments
 
-        if args.embed_entities:
-            self.embed_entities = Embedding(22, embed_dim, self.padding_idx)
+        self.embed_entities = None
+        if args.embed_entities_encoder:
+            self.embed_entities = Embedding(23, embed_dim, self.padding_idx)
 
+        self.embed_segments = None
         if args.segment_tokens is not None:        
             self.embed_segments = Embedding(
                 self.max_segments, embed_dim, self.padding_idx)
@@ -437,7 +439,7 @@ class TransformerEncoder(FairseqEncoder):
 
         self.apply(init_bert_params)
 
-    def forward(self, src_tokens, src_lengths, src_entities, src_segment_labels, **unused):
+    def forward(self, src_tokens, src_lengths, src_entities, src_segment_labels=None, **unused):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -552,9 +554,11 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             args.max_target_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
 
-        if args.embed_entities:
-            self.embed_entities = Embedding(22, self.embed_dim, self.padding_idx)
+        self.embed_entities = None
+        if args.embed_entities_decoder:
+           self.embed_entities = Embedding(23, self.embed_dim, self.padding_idx)
 
+        self.embed_segments = None
         if args.segment_tokens:
             self.embed_segments = Embedding(
                 self.max_segments, self.embed_dim, self.padding_idx)
@@ -588,7 +592,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 prev_output_entities=None,
                 tgt_segment_labels=None,
                 **unused):
-        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, tgt_segment_labels, **unused)
+        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, tgt_segment_labels=None, **unused)
         x = self.output_layer(x)
         return x, extra
 
@@ -604,13 +608,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             ) if self.embed_positions is not None else None
 
         if incremental_state is not None:
-            print('we have incremental state')
-            if prev_output_entities is None:
-                if random.random() < 0.5:
+            if self.embed_entities is not None and prev_output_entities is None:
+                if prev_output_tokens.shape[1] > 1:
                     prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
                 else:
-                    prev_output_entities = torch.ones_like(prev_output_tokens)
-            prev_output_entities = prev_output_entities[:, -1:]
+                    prev_output_entities = create_cheap_ner(prev_output_tokens, self.dictionary)
+            
+                prev_output_entities = prev_output_entities[:, -1:]
             prev_output_tokens = prev_output_tokens[:, -1:]
             if positions is not None:
                 positions = positions[:, -1:]
