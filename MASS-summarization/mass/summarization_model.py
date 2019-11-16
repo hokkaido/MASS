@@ -82,7 +82,7 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
                                  ' (requires shared dictionary and embed dim)')
         parser.add_argument('--load-from-pretrained-model', type=str, default=None,
                             help='Load from pretrained model')
-        parser.add_argument('--copy-attn', '-copy_attn', default=False, action='store_true',
+        parser.add_argument('--copy-attn', default=False, action='store_true',
                             help='Train copy attention layer.')
         # fmt: on
 
@@ -582,6 +582,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.embed_out = nn.Parameter(torch.Tensor(len(dictionary), self.embed_dim))
             nn.init.normal_(self.embed_out, mean=0, std=self.embed_dim ** -0.5)
 
+        if self.copy_attn:
+            self.embed_out_copy = nn.Parameter(torch.Tensor(len(dictionary), 1))
+            nn.init.normal_(self.embed_out_copy, mean=0, std=1 ** -0.5)
+
         self.emb_layer_norm = LayerNorm(embed_dim)
         self.apply(init_bert_params)
 
@@ -656,9 +660,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x = x.transpose(0, 1)
         attns = {'attn': attn, 'inner_states': inner_states}
         
-        #if self.copy_attn:
-        #   print('WEGOGOG')
-        #   attns['copy'] = attn
+        if self.copy_attn:
+            print('COPY')
+            attns['copy'] = attn
 
         return x, attns
 

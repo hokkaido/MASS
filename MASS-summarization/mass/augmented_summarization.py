@@ -148,6 +148,31 @@ class AugmentedSummarizationTask(TranslationTask):
        print('woot')
        return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary)
 
+    def train_step(self, sample, model, criterion, optimizer, ignore_grad=False):
+        """
+        Do forward and backward, and return the loss as computed by *criterion*
+        for the given *model* and *sample*.
+        Args:
+            sample (dict): the mini-batch. The format is defined by the
+                :class:`~fairseq.data.FairseqDataset`.
+            model (~fairseq.models.BaseFairseqModel): the model
+            criterion (~fairseq.criterions.FairseqCriterion): the criterion
+            optimizer (~fairseq.optim.FairseqOptimizer): the optimizer
+            ignore_grad (bool): multiply loss by 0 if this is set to True
+        Returns:
+            tuple:
+                - the loss
+                - the sample size, which is used as the denominator for the
+                  gradient
+                - logging outputs to display while training
+        """
+        model.train()
+        loss, sample_size, logging_output = criterion(model, sample)
+        if ignore_grad:
+            loss *= 0
+        optimizer.backward(loss)
+        return loss, sample_size, logging_output
+
     def max_positions(self):
         """Return the max sentence length allowed by the task."""
         return self.args.max_source_positions, self.args.max_target_positions

@@ -7,7 +7,7 @@ import math
 from .ner import align_tokens, ENTITY_TYPES
 
 from fairseq import utils
-from fairseq.data import data_utils, BaseWrapperDataset
+from fairseq.data import data_utils, BaseWrapperDataset, Dictionary
 
 import spacy
 
@@ -67,6 +67,43 @@ def collate_ner_tokens(values, pad_idx, left_pad=False, move_eos_to_beginning=Fa
     for i, v in enumerate(values):
         copy_tensor(v, res[i][size - len(v):] if left_pad else res[i][:len(v)])
     return res
+
+def _dynamic_dict(sample, src_dict):
+    """Create copy-vocab and numericalize with it.
+    In-place adds ``"src_map"`` to ``example``. That is the copy-vocab
+    numericalization of the tokenized ``example["src"]``. If ``example``
+    has a ``"tgt"`` key, adds ``"alignment"`` to example. That is the
+    copy-vocab numericalization of the tokenized ``example["tgt"]``. The
+    alignment has an initial and final UNK token to match the BOS and EOS
+    tokens.
+    Args:
+        example (dict): An example dictionary with a ``"src"`` key and
+            maybe a ``"tgt"`` key. (This argument changes in place!)
+        src_field (torchtext.data.Field): Field object.
+        tgt_field (torchtext.data.Field): Field object.
+    Returns:
+        torchtext.data.Vocab and ``example``, changed as described.
+    """
+
+    src = sample['source']
+
+    # make a small vocab containing just the tokens in the source sequence
+    src_ex_dict = Dictionary(unk=src_dict.unk_word, pad=src_dict.pad_word)
+
+    unk_idx = src_ex_dict.unk()
+
+    # Map source tokens to indices in the dynamic dict.
+
+    src_map = torch.LongTensor([src_ex_dict.index(src_dict[idx]) for idx in src])
+
+    sample["src_map"] = src_map
+    sample["src_ex_dict"] = src_ex_dict
+
+    if "target" in sample:
+        tgt = sample["target"]
+        mask = torch.LongTensor([src_ex_dict.index(src_dict[idx]) for idx in tgt])
+        sample["alignment"] = mask
+    return src_ex_dic, sample
 
 def collate(
     samples, pad_idx, eos_idx, ent_pad_idx, ent_eos_idx, left_pad_source=True, left_pad_target=False,

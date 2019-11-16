@@ -6,3 +6,4 @@ from . import translation
 from . import summarization
 from . import segmented_summarization
 from . import augmented_summarization
+from . import copy_generator
