@@ -55,6 +55,8 @@ class AugmentedSummarizationTask(TranslationTask):
                             help='Add an additional NER embedding layer for encoding')
         parser.add_argument('--embed-entities-decoder', action='store_true',
                             help='Add an additional NER embedding layer for decoding')
+        parser.add_argument('--copy-attn', default=False, action='store_true',
+                            help='Train copy attention layer.')
         # fmt: on
 
     def __init__(self, args, src_dict, tgt_dict, ent_src_dict, ent_tgt_dict):
@@ -65,6 +67,8 @@ class AugmentedSummarizationTask(TranslationTask):
         self.src_dicts['entities'] = ent_src_dict
         self.tgt_dicts['core'] = tgt_dict
         self.tgt_dicts['entities'] = ent_tgt_dict
+        self.copy_attn = args.copy_attn
+        print(args)
 
     @classmethod
     def load_dictionary(cls, filename):
@@ -123,7 +127,8 @@ class AugmentedSummarizationTask(TranslationTask):
         entities = self._load_dataset('entities', split, epoch, combine, **kwargs)
         self.datasets[split] = AugmentedLanguagePairDataset(
             core,
-            entities)
+            entities,
+            copy_attn=self.copy_attn)
     
     def _load_dataset(self, ds_name, split, epoch=0, combine=False, **kwargs):
         paths = self.args.data.split(':')
@@ -172,6 +177,36 @@ class AugmentedSummarizationTask(TranslationTask):
             loss *= 0
         optimizer.backward(loss)
         return loss, sample_size, logging_output
+
+    def build_generator(self, args):
+        if getattr(args, 'score_reference', False):
+            from fairseq.sequence_scorer import SequenceScorer
+            return SequenceScorer(self.target_dictionary)
+        else:
+            from fairseq.sequence_generator import SequenceGenerator
+            from .copy_sequence_generator import CopySequenceGenerator
+            if getattr(args, 'copy_attn', False):
+                seq_gen_cls = CopySequenceGenerator
+            else:
+                seq_gen_cls = SequenceGenerator
+            return seq_gen_cls(
+                self.target_dictionary,
+                beam_size=getattr(args, 'beam', 5),
+                max_len_a=getattr(args, 'max_len_a', 0),
+                max_len_b=getattr(args, 'max_len_b', 200),
+                min_len=getattr(args, 'min_len', 1),
+                normalize_scores=(not getattr(args, 'unnormalized', False)),
+                len_penalty=getattr(args, 'lenpen', 1),
+                unk_penalty=getattr(args, 'unkpen', 0),
+                sampling=getattr(args, 'sampling', False),
+                sampling_topk=getattr(args, 'sampling_topk', -1),
+                sampling_topp=getattr(args, 'sampling_topp', -1.0),
+                temperature=getattr(args, 'temperature', 1.),
+                diverse_beam_groups=getattr(args, 'diverse_beam_groups', -1),
+                diverse_beam_strength=getattr(args, 'diverse_beam_strength', 0.5),
+                match_source_len=getattr(args, 'match_source_len', False),
+                no_repeat_ngram_size=getattr(args, 'no_repeat_ngram_size', 0),
+            )
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""

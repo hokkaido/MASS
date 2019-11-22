@@ -68,7 +68,26 @@ def collate_ner_tokens(values, pad_idx, left_pad=False, move_eos_to_beginning=Fa
         copy_tensor(v, res[i][size - len(v):] if left_pad else res[i][:len(v)])
     return res
 
-def _dynamic_dict(sample, src_dict):
+def collate_src_map(data, left_pad=False):
+    src_size = max([t.size(0) for t in data])
+    src_vocab_size = max([t.max() for t in data]) + 1
+    alignment = torch.zeros(len(data), src_size, src_vocab_size)
+    for i, sent in enumerate(data):
+        for j, t in enumerate(sent):
+            if left_pad:
+                alignment[i, src_size - len(sent) + j, t] = 1
+            else:
+                alignment[i, j, t] = 1
+    return alignment
+
+def collate_copy_alignment(data):
+    tgt_size = max([t.size(0) for t in data])
+    alignment = torch.zeros(len(data), tgt_size).long()
+    for i, sent in enumerate(data):
+        alignment[i,:sent.size(0)] = sent
+    return alignment
+
+def dynamic_dict(sample, src_dict):
     """Create copy-vocab and numericalize with it.
     In-place adds ``"src_map"`` to ``example``. That is the copy-vocab
     numericalization of the tokenized ``example["src"]``. If ``example``
@@ -90,10 +109,10 @@ def _dynamic_dict(sample, src_dict):
     # make a small vocab containing just the tokens in the source sequence
     src_ex_dict = Dictionary(unk=src_dict.unk_word, pad=src_dict.pad_word)
 
-    unk_idx = src_ex_dict.unk()
+    for idx in src:
+        src_ex_dict.add_symbol(src_dict[idx])
 
     # Map source tokens to indices in the dynamic dict.
-
     src_map = torch.LongTensor([src_ex_dict.index(src_dict[idx]) for idx in src])
 
     sample["src_map"] = src_map
@@ -102,15 +121,17 @@ def _dynamic_dict(sample, src_dict):
     if "target" in sample:
         tgt = sample["target"]
         mask = torch.LongTensor([src_ex_dict.index(src_dict[idx]) for idx in tgt])
-        sample["alignment"] = mask
-    return src_ex_dic, sample
+        sample['copy_alignment'] = mask
 
 def collate(
-    samples, pad_idx, eos_idx, ent_pad_idx, ent_eos_idx, left_pad_source=True, left_pad_target=False,
-    input_feeding=True,
+    samples, src_dict, ent_pad_idx, ent_eos_idx, left_pad_source=True, left_pad_target=False,
+    input_feeding=True, copy_attn=False
 ):
     if len(samples) == 0:
         return {}
+
+    pad_idx=src_dict.pad()
+    eos_idx=src_dict.eos()
 
     def merge(key, left_pad, move_eos_to_beginning=False):
         return data_utils.collate_tokens(
@@ -124,7 +145,15 @@ def collate(
             ent_pad_idx, ent_eos_idx, left_pad, move_eos_to_beginning,
         )
 
+    def prepare_copy_attn():
+        for s in samples:
+            dynamic_dict(s, src_dict)
+
     id = torch.LongTensor([s['id'] for s in samples])
+
+    if copy_attn:
+        prepare_copy_attn()
+
     src_tokens = merge('source', left_pad=left_pad_source)
     src_entities = merge_ent('source_entities', left_pad=left_pad_source)
     # sort by descending source length
@@ -135,6 +164,16 @@ def collate(
     src_entities = src_entities.index_select(0, sort_order)
     prev_output_tokens = None
     prev_output_entities = None
+    src_map = None
+    src_ex_dict = None
+    alignment = None
+
+    if copy_attn:
+        src_ex_dict = [samples[idx]['src_ex_dict'] for idx in sort_order]
+        # pad will always be 0 with src dicts
+        src_map = collate_src_map([s['src_map'] for s in samples], left_pad=left_pad_source)
+        src_map = src_map.index_select(0, sort_order)
+
     target = None
     if samples[0].get('target', None) is not None:
         target = merge('target', left_pad=left_pad_target)
@@ -155,6 +194,9 @@ def collate(
                 move_eos_to_beginning=True,
             )
             prev_output_entities = prev_output_entities.index_select(0, sort_order)
+        if copy_attn:
+            alignment = merge('copy_alignment', left_pad=left_pad_target)
+            alignment = alignment.index_select(0, sort_order)
     else:
         ntokens = sum(len(s['source']) for s in samples)
 
@@ -173,6 +215,12 @@ def collate(
         batch['net_input']['prev_output_tokens'] = prev_output_tokens
     if prev_output_entities is not None:
         batch['net_input']['prev_output_entities'] = prev_output_entities
+    if src_ex_dict is not None:
+        batch['src_ex_dict'] = src_ex_dict
+    if src_map is not None:
+        batch['src_map'] = src_map
+    if alignment is not None:
+        batch['copy_alignment'] = alignment
     return batch
 
 class AugmentedLanguagePairDataset(BaseWrapperDataset):
@@ -180,9 +228,10 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
         
         Requires a shared vocabulary
     """
-    def __init__(self, dataset, entities):
-        super().__init__(dataset)      
+    def __init__(self, dataset, entities, copy_attn=False):
+        super().__init__(dataset)
         self.entities = entities
+        self.copy_attn = copy_attn
 
     def __getitem__(self, index):
 
@@ -219,9 +268,9 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
                   on the left if *left_pad_target* is ``True``.
         """
         return collate(
-            samples, pad_idx=self.dataset.src_dict.pad(), eos_idx=self.dataset.src_dict.eos(),
+            samples, src_dict=self.dataset.src_dict,
             ent_pad_idx=self.entities.src_dict.pad(), ent_eos_idx=self.entities.src_dict.eos(),
             left_pad_source=self.dataset.left_pad_source, left_pad_target=self.dataset.left_pad_target,
-            input_feeding=self.dataset.input_feeding,
+            input_feeding=self.dataset.input_feeding, copy_attn=self.copy_attn
         )
 

@@ -20,7 +20,7 @@ from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .learned_sentence_embedding import LearnedPositionalSentenceEmbedding
 from .ner import ENTITY_TYPES
-from .utils import create_cheap_ner, create_ner_from_output_tokens
+from .utils import aeq, create_cheap_ner, create_ner_from_output_tokens
 import random
 
 DEFAULT_MAX_SOURCE_POSITIONS = 512
@@ -82,8 +82,6 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
                                  ' (requires shared dictionary and embed dim)')
         parser.add_argument('--load-from-pretrained-model', type=str, default=None,
                             help='Load from pretrained model')
-        parser.add_argument('--copy-attn', default=False, action='store_true',
-                            help='Train copy attention layer.')
         # fmt: on
 
     @classmethod
@@ -309,7 +307,7 @@ class TransformerDecoderLayer(nn.Module):
 
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim, export=export)
-        self.need_attn = False
+        self.need_attn = True
         
     def forward(
         self,
@@ -358,7 +356,7 @@ class TransformerDecoderLayer(nn.Module):
             key_padding_mask=encoder_mask,
             incremental_state=incremental_state,
             static_kv=True,
-            need_weights=(not self.training and self.need_attn),
+            need_weights=self.need_attn,
         )
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
@@ -374,7 +372,8 @@ class TransformerDecoderLayer(nn.Module):
         return x, attn
     
     def make_generation_fast_(self, need_attn=False, **kwargs):
-        self.need_attn = need_attn
+        #if self.copy_attn is False:
+        self.need_attn = True
 
 
 class TransformerEncoder(FairseqEncoder):
@@ -583,8 +582,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             nn.init.normal_(self.embed_out, mean=0, std=self.embed_dim ** -0.5)
 
         if self.copy_attn:
-            self.embed_out_copy = nn.Parameter(torch.Tensor(len(dictionary), 1))
-            nn.init.normal_(self.embed_out_copy, mean=0, std=1 ** -0.5)
+            self.embed_out_copy = nn.Parameter(torch.Tensor(1, self.embed_dim))
+            nn.init.normal_(self.embed_out_copy, mean=0, std=self.embed_dim ** -0.5)
 
         self.emb_layer_norm = LayerNorm(embed_dim)
         self.apply(init_bert_params)
@@ -661,18 +660,26 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         attns = {'attn': attn, 'inner_states': inner_states}
         
         if self.copy_attn:
-            print('COPY')
             attns['copy'] = attn
 
         return x, attns
 
     def output_layer(self, features, **kwargs):
         """Project features to the vocabulary size."""
+        # features = bsz, tgt_len, embed_dim
+        # logits = bsz, tgt_len, vocab_size
+        # logits_copy = bsz, tgt_len, 1
         # project back to size of vocabulary
+       
         if self.share_input_output_embed:
-            return F.linear(features, self.embed_tokens.weight)
+            logits = F.linear(features, self.embed_tokens.weight)
         else:
-            return F.linear(features, self.embed_out)
+            logits = F.linear(features, self.embed_out)
+
+        if self.copy_attn:
+            logits_copy = F.linear(features, self.embed_out_copy)
+            return logits, logits_copy
+        return logits
 
     def max_positions(self):
         """Maximum output length supported by the decoder."""
@@ -685,6 +692,82 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if not hasattr(self, '_future_mask') or self._future_mask is None or self._future_mask.device != tensor.device or self._future_mask.size(0) < dim:
             self._future_mask = torch.triu(utils.fill_with_neg_inf(tensor.new(dim, dim)), 1)
         return self._future_mask[:dim, :dim]
+
+    def _bottle(self, _v):
+        return _v.view(-1, _v.size(2))
+
+    def _unbottle(self, _v, batch_size):
+        return _v.view(-1, batch_size, _v.size(1))
+
+    def get_normalized_probs(self, net_output, log_probs, sample):
+        """Get normalized probabilities (or log probs) from a net's output."""
+
+
+        if hasattr(self, 'adaptive_softmax') and self.adaptive_softmax is not None:
+            raise ValueError('Adaptive softmax not supported with summarization model')
+
+        if self.copy_attn:
+            logits, logits_copy = net_output[0]
+            attn = net_output[1]['copy']
+            
+            # Original probabilities.
+            logits = self._bottle(logits)
+            logits_copy = self._bottle(logits_copy)
+            attn = self._bottle(attn)
+            src_map = sample['src_map']
+            batch, slen, cvocab = src_map.size()
+
+            logits[:, self.padding_idx] = -float('inf')
+            prob = torch.softmax(logits, 1)
+
+            # Probability of copying p(z=1) batch.
+            p_copy = torch.sigmoid(logits_copy)
+            # Probability of not copying: p_{word}(w) * (1 - p(z))
+            out_prob = torch.mul(prob, 1 - p_copy)
+            mul_attn = torch.mul(attn, p_copy)
+
+            copy_prob = torch.bmm(
+                mul_attn.view(-1, batch, slen).transpose(0, 1),
+                src_map
+            ).transpose(0, 1)
+            copy_prob = copy_prob.contiguous().view(-1, cvocab)
+            return torch.cat([out_prob, copy_prob], -1)
+
+
+            # print(logits.size())
+            # print(logits_copy.size())
+            
+            # self._bottle(logits)[:, self.padding_idx] = -float('inf')
+            # src_map = sample['src_map']
+            # attn = net_output[1]['copy']
+
+            # batch, tlen, slen = attn.size()
+            # batch_, slen_, cvocab = src_map.size()
+            # aeq(slen, slen_)
+            # aeq(batch, batch_)
+            
+            # p = utils.softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
+
+            # # Probability of copying p(z=1) batch.
+            # p_copy = torch.sigmoid(logits_copy)
+
+            # # Probability of not copying: p_{word}(w) * (1 - p(z))
+            # out_prob = torch.mul(p, 1 - p_copy)
+            # mul_attn = torch.mul(attn, p_copy)
+
+            # copy_prob = torch.bmm(
+            #     mul_attn.view(-1, batch, slen).transpose(0, 1),
+            #     src_map
+            # )
+
+            # return torch.cat([out_prob, copy_prob.float()], 2)
+
+        else:
+            logits = net_output[0]
+            if log_probs:
+                return utils.log_softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
+            else:
+                return utils.softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
 
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):

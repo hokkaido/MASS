@@ -59,3 +59,12 @@ def create_ner_from_output_tokens(tokens, src_dict, ent_pad_idx=0, ent_eos_idx=2
         output_entities[i] = entities
 
     return output_entities
+
+def aeq(*args):
+    """
+    Assert all arguments have the same value
+    """
+    arguments = (arg for arg in args)
+    first = next(arguments)
+    assert all(arg == first for arg in arguments), \
+        "Not all arguments have the same value: " + str(args)
