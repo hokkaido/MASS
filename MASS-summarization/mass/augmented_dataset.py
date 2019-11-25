@@ -13,19 +13,16 @@ import spacy
 
 nlp = spacy.load("spacy_models/en_core_web_sm_lower")
 
-# sequence = B x T
-def create_segments(sequence, segment_tokens, max_segments):
-    bsz, T = sequence.shape
+# sequence = size T
+def create_segments(sequence, split_idx, max_segments):
     segments = torch.zeros_like(sequence)
     
-    for segment_token in segment_tokens:
+    for segment_token in split_idx:
         segments += sequence.eq(segment_token).type_as(segments)
         
-    segments = torch.cumsum(segments, dim=1)
-    narrowed = torch.narrow(segments, 1, 1, T - 1)
-    append = torch.zeros((bsz, 1)).type_as(narrowed)
+    segments = torch.cumsum(segments, dim=0) + 1
 
-    return torch.cat((append, narrowed), 1).clamp(0, max_segments - 1)
+    return segments.clamp(0, max_segments)
 
 def create_ner(tokens, src_dict):
     """ Given a 1d Tensor (with token indices), return a list of NER tags
@@ -71,7 +68,7 @@ def collate_ner_tokens(values, pad_idx, left_pad=False, move_eos_to_beginning=Fa
 def collate_src_map(data, left_pad=False):
     src_size = max([t.size(0) for t in data])
     src_vocab_size = max([t.max() for t in data]) + 1
-    alignment = torch.zeros(len(data), src_size, src_vocab_size)
+    alignment = torch.zeros(len(data), src_size, src_vocab_size).bool()
     for i, sent in enumerate(data):
         for j, t in enumerate(sent):
             if left_pad:
@@ -82,7 +79,7 @@ def collate_src_map(data, left_pad=False):
 
 def collate_copy_alignment(data):
     tgt_size = max([t.size(0) for t in data])
-    alignment = torch.zeros(len(data), tgt_size).long()
+    alignment = data[0].new(len(data), tgt_size).fill_(0)
     for i, sent in enumerate(data):
         alignment[i,:sent.size(0)] = sent
     return alignment
@@ -113,19 +110,19 @@ def dynamic_dict(sample, src_dict):
         src_ex_dict.add_symbol(src_dict[idx])
 
     # Map source tokens to indices in the dynamic dict.
-    src_map = torch.LongTensor([src_ex_dict.index(src_dict[idx]) for idx in src])
+    src_map = src.new([src_ex_dict.index(src_dict[idx]) for idx in src])
 
     sample["src_map"] = src_map
     sample["src_ex_dict"] = src_ex_dict
 
     if "target" in sample:
         tgt = sample["target"]
-        mask = torch.LongTensor([src_ex_dict.index(src_dict[idx]) for idx in tgt])
+        mask = src.new([src_ex_dict.index(src_dict[idx]) for idx in tgt])
         sample['copy_alignment'] = mask
 
 def collate(
     samples, src_dict, ent_pad_idx, ent_eos_idx, left_pad_source=True, left_pad_target=False,
-    input_feeding=True, copy_attn=False
+    input_feeding=True, copy_attn=False, max_segments=0
 ):
     if len(samples) == 0:
         return {}
@@ -137,6 +134,12 @@ def collate(
         return data_utils.collate_tokens(
             [s[key] for s in samples],
             pad_idx, eos_idx, left_pad, move_eos_to_beginning,
+        )
+
+    def merge_seg(key, left_pad, move_eos_to_beginning=False):
+        return data_utils.collate_tokens(
+            [s[key] for s in samples],
+            0, max_segments + 1, left_pad, move_eos_to_beginning,
         )
 
     def merge_ent(key, left_pad, move_eos_to_beginning=False):
@@ -162,8 +165,10 @@ def collate(
     id = id.index_select(0, sort_order)
     src_tokens = src_tokens.index_select(0, sort_order)
     src_entities = src_entities.index_select(0, sort_order)
+    src_segments = None
     prev_output_tokens = None
     prev_output_entities = None
+    prev_output_segments = None
     src_map = None
     src_ex_dict = None
     alignment = None
@@ -173,6 +178,14 @@ def collate(
         # pad will always be 0 with src dicts
         src_map = collate_src_map([s['src_map'] for s in samples], left_pad=left_pad_source)
         src_map = src_map.index_select(0, sort_order)
+
+    if samples[0].get('source_segments', None) is not None:
+        src_segments = merge_seg('source_segments', left_pad=left_pad_source)
+        src_segments = src_segments.index_select(0, sort_order)
+
+    if samples[0].get('target_segments', None) is not None:
+        prev_output_segments = merge_seg('target_segments', left_pad=left_pad_target)
+        prev_output_segments = prev_output_segments.index_select(0, sort_order)
 
     target = None
     if samples[0].get('target', None) is not None:
@@ -207,6 +220,7 @@ def collate(
         'net_input': {
             'src_tokens': src_tokens,
             'src_entities': src_entities,
+            'src_segments': src_segments,
             'src_lengths': src_lengths,
         },
         'target': target,
@@ -215,23 +229,53 @@ def collate(
         batch['net_input']['prev_output_tokens'] = prev_output_tokens
     if prev_output_entities is not None:
         batch['net_input']['prev_output_entities'] = prev_output_entities
+    if prev_output_segments is not None:
+        batch['net_input']['prev_output_segments'] = prev_output_segments
     if src_ex_dict is not None:
         batch['src_ex_dict'] = src_ex_dict
     if src_map is not None:
         batch['src_map'] = src_map
     if alignment is not None:
         batch['copy_alignment'] = alignment
+
     return batch
+
+def truncate(data, max_len, eos_idx):
+    has_eos = data[-1] == eos_idx
+    data = data[:max_len]
+    if has_eos: 
+        data[-1] = eos_idx
+    else:
+        print('NO WE DONT HAVE')
+    return data
 
 class AugmentedLanguagePairDataset(BaseWrapperDataset):
     """ Wrapper for augmented language pair datasets 
         
         Requires a shared vocabulary
     """
-    def __init__(self, dataset, entities, copy_attn=False):
+    def __init__(self, 
+        dataset, 
+        entities, 
+        copy_attn=False, 
+        segment_tokens=None, 
+        max_segments=None, 
+        truncate_source_positions=None, 
+        truncate_target_positions=None):
         super().__init__(dataset)
         self.entities = entities
         self.copy_attn = copy_attn
+        self.segment_tokens = segment_tokens
+        self.max_segments = max_segments
+        self.truncate_source_positions = truncate_source_positions
+        self.truncate_target_positions = truncate_target_positions
+        self.src_segment_tokens_idx = None
+        self.tgt_segment_tokens_idx = None
+
+        if self.segment_tokens is not None and self.max_segments is not None :
+            segment_tokens = self.segment_tokens.split(',')
+            self.src_segment_tokens_idx = [self.dataset.src_dict.index(token) for token in segment_tokens]
+            self.tgt_segment_tokens_idx = [self.dataset.tgt_dict.index(token) for token in segment_tokens]
 
     def __getitem__(self, index):
 
@@ -240,6 +284,32 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
 
         sample['source_entities'] = entities['source']
         sample['target_entities'] = entities['target']
+
+        if self.src_segment_tokens_idx is not None:
+            sample['source_segments'] = create_segments(
+                sample['source'], 
+                self.src_segment_tokens_idx, 
+                self.max_segments)
+                
+        if self.tgt_segment_tokens_idx is not None:
+            sample['target_segments'] = create_segments(
+                sample['target'], 
+                self.tgt_segment_tokens_idx, 
+                self.max_segments)
+
+        if self.truncate_source_positions is not None:
+            for key, eos_idx in zip(
+                ['source', 'source_entities', 'source_segments'], 
+                [self.dataset.src_dict.eos(), self.entities.src_dict.eos(), self.max_segments + 1]):
+                if key in sample and len(sample[key]) > self.truncate_soure_positions:
+                    sample[key] = truncate(sample[key], self.truncate_source_positions, eos_idx)
+
+        if self.truncate_target_positions is not None:
+            for key, eos_idx in zip(
+                ['targeta', 'target_entities', 'target_segments'], 
+                [self.dataset.tgt_dict.eos(), self.entities.tgt_dict.eos(), self.max_segments + 1]):
+                if key in sample and len(sample[key]) > self.truncate_target_positions:
+                    sample[key] = truncate(sample[key], self.truncate_target_positions, eos_idx)
 
         return sample
         
@@ -271,6 +341,6 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
             samples, src_dict=self.dataset.src_dict,
             ent_pad_idx=self.entities.src_dict.pad(), ent_eos_idx=self.entities.src_dict.eos(),
             left_pad_source=self.dataset.left_pad_source, left_pad_target=self.dataset.left_pad_target,
-            input_feeding=self.dataset.input_feeding, copy_attn=self.copy_attn
+            input_feeding=self.dataset.input_feeding, copy_attn=self.copy_attn, max_segments=self.max_segments
         )
 

@@ -47,6 +47,10 @@ class AugmentedSummarizationTask(TranslationTask):
                             help='max number of tokens in the target sequence')
         parser.add_argument('--upsample-primary', default=1, type=int,
                             help='amount to upsample primary dataset')
+        parser.add_argument('--embed-segments-encoder', action='store_true',
+                            help='Add an additional sentence embedding layer for encoding')
+        parser.add_argument('--embed-segments-decoder', action='store_true',
+                            help='Add an additional sentence embedding layer for decoding')   
         parser.add_argument('--segment-tokens', default=None, type=str,
                             help='Tokens to use as a segment, i.e. ".,!,?,[SEP]". This will add an additional segment embedding')
         parser.add_argument('--max-segments', default=64, type=int, metavar='N',
@@ -57,6 +61,10 @@ class AugmentedSummarizationTask(TranslationTask):
                             help='Add an additional NER embedding layer for decoding')
         parser.add_argument('--copy-attn', default=False, action='store_true',
                             help='Train copy attention layer.')
+        parser.add_argument('--truncate-source-positions', default=None, type=int, metavar='N',
+                            help='truncate number of tokens in the source sequence during training and validation')
+        parser.add_argument('--truncate-target-positions', default=None, type=int, metavar='N',
+                            help='truncate number of tokens in the target sequence during training and validation')
         # fmt: on
 
     def __init__(self, args, src_dict, tgt_dict, ent_src_dict, ent_tgt_dict):
@@ -68,6 +76,13 @@ class AugmentedSummarizationTask(TranslationTask):
         self.tgt_dicts['core'] = tgt_dict
         self.tgt_dicts['entities'] = ent_tgt_dict
         self.copy_attn = args.copy_attn
+        self.embed_segments_encoder = args.embed_segments_encoder
+        self.embed_segments_decoder = args.embed_segments_decoder
+        self.segment_tokens = args.segment_tokens
+        self.max_segments = args.max_segments
+        self.truncate_source_positions = args.truncate_source_positions
+        self.truncate_target_positions = args.truncate_target_positions
+        self.load_dataset('test')
         print(args)
 
     @classmethod
@@ -125,10 +140,36 @@ class AugmentedSummarizationTask(TranslationTask):
         """
         core = self._load_dataset('core', split, epoch, combine, **kwargs)
         entities = self._load_dataset('entities', split, epoch, combine, **kwargs)
+        truncate_source_positions = self.truncate_source_positions if split != 'test' else None
+        truncate_target_positions = self.truncate_target_positions if split != 'test' else None
         self.datasets[split] = AugmentedLanguagePairDataset(
             core,
             entities,
-            copy_attn=self.copy_attn)
+            copy_attn=self.copy_attn,
+            segment_tokens=self.segment_tokens,
+            max_segments=self.max_segments,
+            truncate_source_positions=truncate_source_positions,
+            truncate_target_positions=truncate_target_positions)
+
+        #ds = self.datasets[split]
+        
+        # print(split)
+        # src_max = 0
+        # tgt_max = 0
+
+        # for idx in range(len(ds)):
+        #     item = ds[idx]
+        #     sm = len(item['source'])
+        #     tm = len(item['target'])
+        #     if sm > src_max:
+        #         src_max = sm
+        #         print(' '.join([ds.dataset.src_dict[t] for t in item['source']]))
+        #         print('new src max ', split, ' ', src_max)
+
+        #     if tm > tgt_max:
+        #         tgt_max = tm
+        #         print(' '.join([ds.dataset.tgt_dict[t] for t in item['target']]))
+        #         print('new tgt max ', split, ' ', tgt_max)
     
     def _load_dataset(self, ds_name, split, epoch=0, combine=False, **kwargs):
         paths = self.args.data.split(':')

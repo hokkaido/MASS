@@ -140,7 +140,7 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
         return self.encoder.max_positions(), self.decoder.max_positions()
 
     def forward(self, src_tokens=None, src_lengths=None, prev_output_tokens=None, src_entities=None, 
-                prev_output_entities=None, src_segment_labels=None, tgt_segment_labels=None, **kwargs):
+                prev_output_entities=None, src_segments=None, prev_output_segments=None, **kwargs):
         """
         Run the forward pass for an encoder-decoder model.
 
@@ -167,14 +167,14 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
             src_tokens, 
             src_lengths=src_lengths, 
             src_entities=src_entities, 
-            src_segment_labels=src_segment_labels, 
+            src_segments=src_segments, 
             **kwargs)
 
         decoder_out = self.decoder(
             prev_output_tokens, 
             encoder_out=encoder_out, 
             prev_output_entities=prev_output_entities, 
-            tgt_segment_labels=tgt_segment_labels,
+            prev_output_segments=prev_output_segments,
             **kwargs)
             
         return decoder_out
@@ -411,14 +411,10 @@ class TransformerEncoder(FairseqEncoder):
             self.embed_entities = Embedding(23, embed_dim, self.padding_idx)
 
         self.embed_segments = None
-        if args.segment_tokens is not None:        
+        if args.embed_segments_encoder is not None:        
             self.embed_segments = Embedding(
-                self.max_segments, embed_dim, self.padding_idx)
+                self.max_segments + 2, embed_dim, self.padding_idx)
         
-        """self.embed_sent_positions = LearnedPositionalSentenceEmbedding(
-            args.max_source_positions + 1 + self.padding_idx, embed_dim, self.padding_idx, self.eos_idx
-        )"""
-
         self.layers = nn.ModuleList([])
 
         self.layers.extend([
@@ -438,7 +434,7 @@ class TransformerEncoder(FairseqEncoder):
 
         self.apply(init_bert_params)
 
-    def forward(self, src_tokens, src_lengths, src_entities, src_segment_labels=None, **unused):
+    def forward(self, src_tokens, src_lengths, src_entities, src_segments=None, **unused):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -464,15 +460,11 @@ class TransformerEncoder(FairseqEncoder):
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
       
-        if self.embed_segments is not None and src_segment_labels is not None:
-            x += self.embed_segments(src_segment_labels)
+        if self.embed_segments is not None and src_segments is not None:
+            x += self.embed_segments(src_segments)
 
         if self.embed_entities is not None and src_entities is not None:
             x += self.embed_entities(src_entities)
-
-        """
-        if self.embed_sent_positions is not None:
-            x += self.embed_sent_positions(src_tokens)"""
 
         if self.emb_layer_norm:
             x = self.emb_layer_norm(x)
@@ -558,9 +550,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
            self.embed_entities = Embedding(23, self.embed_dim, self.padding_idx)
 
         self.embed_segments = None
-        if args.segment_tokens:
+        if args.embed_segments_decoder:
             self.embed_segments = Embedding(
-                self.max_segments, self.embed_dim, self.padding_idx)
+                self.max_segments + 2, self.embed_dim, self.padding_idx)
         
 
         self.layers = nn.ModuleList([])
@@ -593,14 +585,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 encoder_out=None, 
                 incremental_state=None, 
                 prev_output_entities=None,
-                tgt_segment_labels=None,
+                prev_output_segments=None,
                 **unused):
-        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, tgt_segment_labels=None, **unused)
+        x, extra = self.extract_features(prev_output_tokens, encoder_out, incremental_state, prev_output_entities, prev_output_segments=None, **unused)
         x = self.output_layer(x)
         return x, extra
 
     def extract_features(self, prev_output_tokens, encoder_out=None, incremental_state=None, 
-                        prev_output_entities=None, tgt_segment_labels=None, **unused):
+                        prev_output_entities=None, prev_output_segments=None, **unused):
         # embed positions
         if 'positions' in unused:
             positions = self.embed_positions._forward(unused['positions'])
@@ -616,7 +608,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                     prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
                 else:
                     prev_output_entities = create_cheap_ner(prev_output_tokens, self.dictionary)
-            
                 prev_output_entities = prev_output_entities[:, -1:]
             prev_output_tokens = prev_output_tokens[:, -1:]
             if positions is not None:
@@ -627,8 +618,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if positions is not None:
             x += positions
                           
-        if self.embed_segments is not None and tgt_segment_labels is not None:
-            x += self.embed_segments(tgt_segment_labels)
+        if self.embed_segments is not None and prev_output_segments is not None:
+            x += self.embed_segments(prev_output_segments)
 
         if self.embed_entities is not None and prev_output_entities is not None:
             x += self.embed_entities(prev_output_entities)
@@ -709,7 +700,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if self.copy_attn:
             logits, logits_copy = net_output[0]
             attn = net_output[1]['copy']
-            
+
             # Original probabilities.
             logits = self._bottle(logits)
             logits_copy = self._bottle(logits_copy)
@@ -728,7 +719,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
             copy_prob = torch.bmm(
                 mul_attn.view(-1, batch, slen).transpose(0, 1),
-                src_map
+                src_map.type(mul_attn.dtype)
             ).transpose(0, 1)
             copy_prob = copy_prob.contiguous().view(-1, cvocab)
             return torch.cat([out_prob, copy_prob], -1)
