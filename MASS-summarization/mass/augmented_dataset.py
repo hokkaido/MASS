@@ -11,8 +11,6 @@ from fairseq.data import data_utils, BaseWrapperDataset, Dictionary
 
 import spacy
 
-nlp = spacy.load("spacy_models/en_core_web_sm_lower")
-
 # sequence = size T
 def create_segments(sequence, split_idx, max_segments):
     segments = torch.zeros_like(sequence)
@@ -23,47 +21,6 @@ def create_segments(sequence, split_idx, max_segments):
     segments = torch.cumsum(segments, dim=0) + 1
 
     return segments.clamp(0, max_segments)
-
-def create_ner(tokens, src_dict):
-    """ Given a 1d Tensor (with token indices), return a list of NER tags
-    
-    """
-    entities = torch.zeros_like(tokens)
-    token_list = [src_dict[idx] for idx in tokens]
-    pad_idx = src_dict.pad()
-    txt = ' '.join(token_list)
-    txt = data_utils.process_bpe_symbol(txt, ' ##')
-    doc = nlp(txt)
-
-    _, alignments = align_tokens(doc, token_list)
-    
-    for i in range(len(alignments)):
-        spacy_token = doc[i]
-        ent_type = pad_idx + 1
-        if spacy_token.ent_type_ in ENTITY_TYPES:
-            ent_type += ENTITY_TYPES[spacy_token.ent_type_]
-
-        for wp_idx in alignments[i]:
-            entities[wp_idx] = ent_type
-    
-    return entities
-
-def collate_ner_tokens(values, pad_idx, left_pad=False, move_eos_to_beginning=False):
-    """Convert a list of 1d tensors into a padded 2d tensor."""
-    size = max(v.size(0) for v in values)
-    res = values[0].new(len(values), size).fill_(pad_idx)
-
-    def copy_tensor(src, dst):
-        assert dst.numel() == src.numel()
-        if move_eos_to_beginning:
-            dst[0] = pad_idx + 1 # DANGER, was EOS initially, now set to 1, which is equal to no entity type
-            dst[1:] = src[:-1]
-        else:
-            dst.copy_(src)
-
-    for i, v in enumerate(values):
-        copy_tensor(v, res[i][size - len(v):] if left_pad else res[i][:len(v)])
-    return res
 
 def collate_src_map(data, left_pad=False):
     src_size = max([t.size(0) for t in data])
@@ -272,7 +229,7 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
         self.src_segment_tokens_idx = None
         self.tgt_segment_tokens_idx = None
 
-        if self.segment_tokens is not None and self.max_segments is not None :
+        if self.segment_tokens is not None and self.max_segments is not None:
             segment_tokens = self.segment_tokens.split(',')
             self.src_segment_tokens_idx = [self.dataset.src_dict.index(token) for token in segment_tokens]
             self.tgt_segment_tokens_idx = [self.dataset.tgt_dict.index(token) for token in segment_tokens]
@@ -301,7 +258,7 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
             for key, eos_idx in zip(
                 ['source', 'source_entities', 'source_segments'], 
                 [self.dataset.src_dict.eos(), self.entities.src_dict.eos(), self.max_segments + 1]):
-                if key in sample and len(sample[key]) > self.truncate_soure_positions:
+                if key in sample and len(sample[key]) > self.truncate_source_positions:
                     sample[key] = truncate(sample[key], self.truncate_source_positions, eos_idx)
 
         if self.truncate_target_positions is not None:

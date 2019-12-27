@@ -20,7 +20,7 @@ from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .learned_sentence_embedding import LearnedPositionalSentenceEmbedding
 from .ner import ENTITY_TYPES
-from .utils import aeq, create_cheap_ner, create_ner_from_output_tokens
+from .utils import aeq, create_cheap_ner, create_ner_from_output_tokens, create_segments_for_inference
 import random
 
 DEFAULT_MAX_SOURCE_POSITIONS = 512
@@ -404,14 +404,21 @@ class TransformerEncoder(FairseqEncoder):
             args.max_source_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
 
-        self.max_segments = args.max_segments
+        if getattr(args, 'max_segments', False):
+            self.max_segments = args.max_segments
 
         self.embed_entities = None
-        if args.embed_entities_encoder:
+        # 2nd check is for backwards compatibility
+        if getattr(args, 'embed_entities_encoder', False) or getattr(args, 'embed_entities', False):
             self.embed_entities = Embedding(23, embed_dim, self.padding_idx)
 
+
+        # 0 = PAD
+        # 1 = First sentence
+        # max_segments = Last sentence
+        # max_segments + 1 = EOS
         self.embed_segments = None
-        if args.embed_segments_encoder is not None:        
+        if getattr(args, 'embed_segments_encoder', False):        
             self.embed_segments = Embedding(
                 self.max_segments + 2, embed_dim, self.padding_idx)
         
@@ -540,19 +547,26 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.embed_dim = embed_dim
         self.embed_tokens = embed_tokens
         self.embed_scale = math.sqrt(embed_dim)  # todo: try with input_embed_dim
-        self.max_segments = args.max_segments
+
+        if getattr(args, 'max_segments', False):
+            self.max_segments = args.max_segments
+            
         self.embed_positions = LearnedPositionalEmbedding(
             args.max_target_positions + 1 + self.padding_idx, embed_dim, self.padding_idx,
         )
 
         self.embed_entities = None
-        if args.embed_entities_decoder:
+        if getattr(args, 'embed_entities_decoder', False):
            self.embed_entities = Embedding(23, self.embed_dim, self.padding_idx)
 
         self.embed_segments = None
-        if args.embed_segments_decoder:
+        if getattr(args, 'embed_segments_decoder', False):
             self.embed_segments = Embedding(
                 self.max_segments + 2, self.embed_dim, self.padding_idx)
+
+        if getattr(args, 'segment_tokens', False):
+            segment_tokens = args.segment_tokens.split(',')
+            self.segment_tokens_idx = [self.dictionary.index(token) for token in segment_tokens]
         
 
         self.layers = nn.ModuleList([])
@@ -609,6 +623,11 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 else:
                     prev_output_entities = create_cheap_ner(prev_output_tokens, self.dictionary)
                 prev_output_entities = prev_output_entities[:, -1:]
+
+            if self.embed_segments is not None and prev_output_segments is None:
+                prev_output_segments = create_segments_for_inference(prev_output_tokens, self.segment_tokens_idx, self.max_segments)
+                prev_output_segments = prev_output_segments[:, -1:]
+
             prev_output_tokens = prev_output_tokens[:, -1:]
             if positions is not None:
                 positions = positions[:, -1:]
