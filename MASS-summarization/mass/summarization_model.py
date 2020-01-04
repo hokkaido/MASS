@@ -407,9 +407,8 @@ class TransformerEncoder(FairseqEncoder):
         if getattr(args, 'max_segments', False):
             self.max_segments = args.max_segments
 
-        self.embed_entities = None
-        # 2nd check is for backwards compatibility
-        if getattr(args, 'embed_entities_encoder', False) or getattr(args, 'embed_entities', False):
+        self.embed_entities = None       
+        if getattr(args, 'embed_entities_encoder', False):
             self.embed_entities = Embedding(23, embed_dim, self.padding_idx)
 
 
@@ -618,10 +617,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         if incremental_state is not None:
             if self.embed_entities is not None and prev_output_entities is None:
-                if prev_output_tokens.shape[1] > 1:
-                    prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
-                else:
-                    prev_output_entities = create_cheap_ner(prev_output_tokens, self.dictionary)
+                prev_output_entities = create_ner_from_output_tokens(prev_output_tokens, self.dictionary)
                 prev_output_entities = prev_output_entities[:, -1:]
 
             if self.embed_segments is not None and prev_output_segments is None:

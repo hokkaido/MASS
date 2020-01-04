@@ -1,10 +1,13 @@
 import torch
 import spacy
 from fairseq.data import data_utils
+import truecase
 
 from .ner import align_tokens, ENTITY_TYPES
 
-nlp = spacy.load('spacy_models/en_core_web_sm_lower')
+GLOBAL_ITER = 0
+
+nlp = spacy.load('spacy_models/en_core_web_sm_lower', disable=["tagger", "parser"])
 
         # 0 = PAD
         # 1 = First sentence
@@ -40,14 +43,14 @@ def create_cheap_ner(tokens, src_dict, ent_pad_idx=0, ent_eos_idx=21):
     return output_entities
 
 def create_ner_from_output_tokens(tokens, src_dict, ent_pad_idx=0, ent_eos_idx=21):
-
-    #if tokens.shape[1] == 1:
+    global GLOBAL_ITER
+    if GLOBAL_ITER % 20 == 0:
+        global nlp
+        nlp = spacy.load('spacy_models/en_core_web_sm_lower', disable=["tagger", "parser"])
 
     # bsz X seq_len
     txts = []
     token_lists = []
-    pad_idx = src_dict.pad()
-    eos_idx = src_dict.eos()
 
     if tokens.shape[1] == 1:
         # initial inference step, we need to return EOS
@@ -61,6 +64,7 @@ def create_ner_from_output_tokens(tokens, src_dict, ent_pad_idx=0, ent_eos_idx=2
         token_lists.append(token_list)
         txt = ' '.join(token_list)
         txt = data_utils.process_bpe_symbol(txt, ' ##')
+        txt = truecase.get_true_case(txt)
         txts.append(txt)
 
     docs = list(nlp.pipe(txts))
@@ -73,7 +77,7 @@ def create_ner_from_output_tokens(tokens, src_dict, ent_pad_idx=0, ent_eos_idx=2
 
         for j in range(1, len(alignments)):
             spacy_token = doc[j]
-            ent_type = pad_idx + 1
+            ent_type = 1 #NONE
             if spacy_token.ent_type_ in ENTITY_TYPES:
                 ent_type += ENTITY_TYPES[spacy_token.ent_type_]
 
@@ -81,6 +85,7 @@ def create_ner_from_output_tokens(tokens, src_dict, ent_pad_idx=0, ent_eos_idx=2
                 entities[wp_idx] = ent_type
         output_entities[i] = entities
 
+    GLOBAL_ITER += 1
     return output_entities
 
 def aeq(*args):

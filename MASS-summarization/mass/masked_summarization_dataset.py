@@ -83,9 +83,11 @@ class MaskedSummarizationDataset(BaseWrapperDataset):
         # self.random_ratio = args.mask_random
         # self.insert_ratio = args.insert
         # self.rotate_ratio = args.rotate
-        # self.permute_sentence_ratio = args.permute_sentences
-
+        self.permute_sentence_ratio = 1.0
         self.mask_idx = self.dataset.src_dict.index('[MASK]')
+        self.full_stop_idx = self.dataset.src_dict.index('.')
+        self.swap_ratio = 0.5
+        self.mask_ratio = 0.3
         
     def __getitem__(self, index):
         sample = self.dataset[index]
@@ -97,25 +99,12 @@ class MaskedSummarizationDataset(BaseWrapperDataset):
         assert source[-1] == self.dataset.src_dict.eos()
         assert target[-1] == self.dataset.tgt_dict.eos()
 
-        source_entities = entities['source']
-        target_entities = entities['target']
+        if self.permute_sentence_ratio > 0.0:
+            source = self.permute_sentences(source, self.permute_sentence_ratio)
 
-        source_overlap = np.append(np.in1d(source[:-1], target[:-1]), False)
-        target_overlap = np.in1d(target, source)
-        source[source_overlap] = self.mask_idx
-        target = target[target_overlap]
-
-        # if self.permute_sentence_ratio > 0.0:
-        #     source = self.permute_sentences(source, self.permute_sentence_ratio)
-
-        # if self.mask_ratio > 0:
-        #     source = self.add_whole_word_mask(source, self.mask_ratio)
-
-        # if self.insert_ratio > 0:
-        #     source = self.add_insertion_noise(source, self.insert_ratio)
+        source, target = self.add_overlap_mask(source, target, self.swap_ratio, self.mask_ratio)
 
         assert source[-1] == self.dataset.src_dict.eos()
-
         assert target[-1] == self.dataset.tgt_dict.eos()
 
         return {
@@ -124,8 +113,13 @@ class MaskedSummarizationDataset(BaseWrapperDataset):
             'target': target,
         }
 
+    def print_sentence(self, source):
+        print(' '.join(self.dataset.src_dict[idx] for idx in source))
+
     def permute_sentences(self, source, p=1.0):
-        full_stops = (source == self.full_stop_index)
+        if len(source) < 2:
+            return source
+        full_stops = (source == self.full_stop_idx)
         # Pretend it ends with a full stop so last span is a sentence
         full_stops[-2] = 1
 
@@ -139,34 +133,32 @@ class MaskedSummarizationDataset(BaseWrapperDataset):
         ordering = torch.arange(0, num_sentences)
         ordering[substitutions] = substitutions[torch.randperm(num_to_permute)]
 
-        # Ignore <bos> at start
-        index = 1
+        index = 0
         for i in ordering:
             sentence = source[(sentence_ends[i - 1] if i > 0 else 1):sentence_ends[i]]
             result[index:index + sentence.size(0)] = sentence
             index += sentence.size(0)
         return result
 
-    def add_insertion_noise(self, tokens, p):
-        if p == 0.0:
-            return tokens
+    def add_overlap_mask(self, source, target, swap_p=0.5, mask_p=0.3):
 
-        num_tokens = len(tokens)
-        n = int(math.ceil(num_tokens * p))
+        num_tokens = len(source)-1
+        mask_budget = int(math.ceil(num_tokens * mask_p))
 
-        noise_indices = torch.randperm(num_tokens + n - 2)[:n] + 1
-        noise_mask = torch.zeros(size=(num_tokens + n,), dtype=torch.bool)
-        noise_mask[noise_indices] = 1
-        result = torch.LongTensor(n + len(tokens)).fill_(-1)
+        source_overlap = np.in1d(source[:-1], target[:-1])
+        #target_overlap = np.in1d(target[:-1], source[:-1])
 
-        num_random = int(math.ceil(n * self.random_ratio))
-        result[noise_indices[num_random:]] = self.mask_idx
-        result[noise_indices[:num_random]] = torch.randint(low=1, high=len(self.vocab), size=(num_random,))
+        if random.random() >= swap_p:
+            source_overlap = ~source_overlap
+            #target_overlap = ~target_overlap
 
-        result[~noise_mask] = tokens
+        num_overlaps = source_overlap.sum()
+        if num_overlaps > mask_budget:
+            source_overlap[source_overlap] = torch.FloatTensor(num_overlaps).uniform_() < (mask_budget / num_overlaps)
+        source[:-1][source_overlap] = self.mask_idx
+        #target = target[np.append(target_overlap, True)]
 
-        assert (result >= 0).all()
-        return result
+        return source, target
 
     def collater(self, samples):
         """Merge a list of samples to form a mini-batch.
