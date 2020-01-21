@@ -7,7 +7,6 @@ import math
 from fairseq import utils
 from fairseq.data import data_utils, LanguagePairDataset
 
-
 class MaskedLanguagePairDataset(LanguagePairDataset):
     """ Wrapper for masked language datasets 
         (support monolingual and bilingual)

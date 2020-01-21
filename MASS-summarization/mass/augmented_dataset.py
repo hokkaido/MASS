@@ -74,8 +74,9 @@ def dynamic_dict(sample, src_dict):
 
     if "target" in sample:
         tgt = sample["target"]
-        mask = src.new([src_ex_dict.index(src_dict[idx]) for idx in tgt])
-        sample['copy_alignment'] = mask
+        if tgt is not None:
+            mask = src.new([src_ex_dict.index(src_dict[idx]) for idx in tgt])
+            sample['copy_alignment'] = mask
 
 def collate(
     samples, src_dict, ent_pad_idx, ent_eos_idx, left_pad_source=True, left_pad_target=False,
@@ -194,7 +195,6 @@ def collate(
         batch['src_map'] = src_map
     if alignment is not None:
         batch['copy_alignment'] = alignment
-
     return batch
 
 def truncate(data, max_len, eos_idx):
@@ -203,7 +203,7 @@ def truncate(data, max_len, eos_idx):
     if has_eos: 
         data[-1] = eos_idx
     else:
-        print('NO WE DONT HAVE')
+        print('No Eos detected')
     return data
 
 class AugmentedLanguagePairDataset(BaseWrapperDataset):
@@ -263,7 +263,7 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
 
         if self.truncate_target_positions is not None:
             for key, eos_idx in zip(
-                ['targeta', 'target_entities', 'target_segments'], 
+                ['target', 'target_entities', 'target_segments'], 
                 [self.dataset.tgt_dict.eos(), self.entities.tgt_dict.eos(), self.max_segments + 1]):
                 if key in sample and len(sample[key]) > self.truncate_target_positions:
                     sample[key] = truncate(sample[key], self.truncate_target_positions, eos_idx)
@@ -294,6 +294,7 @@ class AugmentedLanguagePairDataset(BaseWrapperDataset):
                   target sentence of shape `(bsz, tgt_len)`. Padding will appear
                   on the left if *left_pad_target* is ``True``.
         """
+
         return collate(
             samples, src_dict=self.dataset.src_dict,
             ent_pad_idx=self.entities.src_dict.pad(), ent_eos_idx=self.entities.src_dict.eos(),

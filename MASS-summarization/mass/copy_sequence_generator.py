@@ -116,7 +116,6 @@ class CopySequenceGenerator(object):
         model = EnsembleModel(models)
         if not self.retain_dropout:
             model.eval()
-
         # model.forward normally channels prev_output_tokens into the decoder
         # separately, but SequenceGenerator directly calls model.encoder
         encoder_input = {
@@ -306,6 +305,10 @@ class CopySequenceGenerator(object):
                 model.reorder_incremental_state(reorder_state)
                 encoder_outs = model.reorder_encoder_out(encoder_outs, reorder_state)
                 src_map = src_map.index_select(0, reorder_state)
+
+            # Replace OOV from COPY MECHANISM
+            tokens = tokens.masked_fill(tokens.gt(self.vocab_size - 1), self.unk)
+
             lprobs, avg_attn_scores = model.forward_decoder(
                 tokens[:, :step + 1], encoder_outs, temperature=self.temperature, sample={'src_map': src_map}
             )

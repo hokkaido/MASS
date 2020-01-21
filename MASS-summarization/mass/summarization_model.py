@@ -42,8 +42,9 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
         :prog:
     """
 
-    def __init__(self, encoder, decoder):
+    def __init__(self, encoder, decoder, is_masked=False):
         super().__init__(encoder, decoder)
+        self.is_masked = is_masked
 
     @staticmethod
     def add_args(parser):
@@ -90,11 +91,15 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
 
         # make sure all arguments are present in older models
         base_architecture(args)
+        # Special joint mask in-domain pretraining (fairseq max_pos bug handling)
+        is_masked = False
 
         if not hasattr(args, 'max_source_positions'):
             args.max_source_positions = DEFAULT_MAX_SOURCE_POSITIONS
         if not hasattr(args, 'max_target_positions'):
             args.max_target_positions = DEFAULT_MAX_TARGET_POSITIONS
+        if hasattr(args, 'word_mask_keep_rand'):
+            is_masked = True
 
         src_dict, tgt_dict = task.source_dictionary, task.target_dictionary
 
@@ -127,16 +132,20 @@ class SummarizationMASSModel(FairseqEncoderDecoderModel):
         encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
         decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
 
-        model = SummarizationMASSModel(encoder, decoder)
+        model = SummarizationMASSModel(encoder, decoder, is_masked=is_masked)
 
         if args.load_from_pretrained_model is not None:
             states = torch.load(args.load_from_pretrained_model, map_location='cpu')
             model.load_state_dict(states, strict=False)
             args.load_from_pretrained_model = None # Clear this param
 
-        return SummarizationMASSModel(encoder, decoder)
+        return SummarizationMASSModel(encoder, decoder, is_masked=is_masked)
 
     def max_positions(self):
+        # (todo): refactor, unfortunately, there is this ugly fairseq bug with max pos handling and 
+        # round robin data sets
+        if self.is_masked:
+            return None
         return self.encoder.max_positions(), self.decoder.max_positions()
 
     def forward(self, src_tokens=None, src_lengths=None, prev_output_tokens=None, src_entities=None, 
@@ -623,7 +632,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if self.embed_segments is not None and prev_output_segments is None:
                 prev_output_segments = create_segments_for_inference(prev_output_tokens, self.segment_tokens_idx, self.max_segments)
                 prev_output_segments = prev_output_segments[:, -1:]
-
             prev_output_tokens = prev_output_tokens[:, -1:]
             if positions is not None:
                 positions = positions[:, -1:]
@@ -738,36 +746,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             ).transpose(0, 1)
             copy_prob = copy_prob.contiguous().view(-1, cvocab)
             return torch.cat([out_prob, copy_prob], -1)
-
-
-            # print(logits.size())
-            # print(logits_copy.size())
-            
-            # self._bottle(logits)[:, self.padding_idx] = -float('inf')
-            # src_map = sample['src_map']
-            # attn = net_output[1]['copy']
-
-            # batch, tlen, slen = attn.size()
-            # batch_, slen_, cvocab = src_map.size()
-            # aeq(slen, slen_)
-            # aeq(batch, batch_)
-            
-            # p = utils.softmax(logits, dim=-1, onnx_trace=self.onnx_trace)
-
-            # # Probability of copying p(z=1) batch.
-            # p_copy = torch.sigmoid(logits_copy)
-
-            # # Probability of not copying: p_{word}(w) * (1 - p(z))
-            # out_prob = torch.mul(p, 1 - p_copy)
-            # mul_attn = torch.mul(attn, p_copy)
-
-            # copy_prob = torch.bmm(
-            #     mul_attn.view(-1, batch, slen).transpose(0, 1),
-            #     src_map
-            # )
-
-            # return torch.cat([out_prob, copy_prob.float()], 2)
-
         else:
             logits = net_output[0]
             if log_probs:
